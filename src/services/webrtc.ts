@@ -36,18 +36,34 @@ class WebRTCManager {
     let media: MediaStream;
     try {
       media = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+      console.log('[RTC] Camera started with tracks:', {
+        audio: media.getAudioTracks().length,
+        video: media.getVideoTracks().length
+      });
     } catch (err: any) {
       // Fallback si no se encuentra cámara: solo audio para no caer la app
       if (err?.name === 'NotFoundError') {
         media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        console.log('[RTC] Fallback to audio only (no camera found)');
       } else {
         throw err;
       }
     }
     this.localStream = media;
     // attach tracks to existing peers
-    for (const [, pc] of this.peers) {
-      media.getTracks().forEach(track => pc.addTrack(track, media));
+    for (const [remoteId, pc] of this.peers) {
+      console.log('[RTC] Adding new tracks to existing peer:', remoteId);
+      const senders = pc.getSenders();
+      media.getTracks().forEach(track => {
+        const existingSender = senders.find(s => s.track?.kind === track.kind);
+        if (existingSender) {
+          console.log('[RTC] Replacing', track.kind, 'track for peer', remoteId);
+          existingSender.replaceTrack(track);
+        } else {
+          console.log('[RTC] Adding new', track.kind, 'track for peer', remoteId);
+          pc.addTrack(track, media);
+        }
+      });
     }
     return this.localStream;
   }
@@ -79,10 +95,31 @@ class WebRTCManager {
     this.localStream.getAudioTracks().forEach(t => (t.enabled = enabled));
   }
 
-  toggleVideoEnabled() {
+  async toggleVideoEnabled() {
     if (!this.localStream) return;
     const vt = this.localStream.getVideoTracks()[0];
-    if (vt) vt.enabled = !vt.enabled;
+    if (vt) {
+      vt.enabled = !vt.enabled;
+      console.log('[RTC] Video toggled to:', vt.enabled);
+      
+      // Si se activó el video, asegurar que los peers lo reciban
+      if (vt.enabled) {
+        console.log('[RTC] Video enabled, ensuring all peers receive it');
+        for (const [remoteId, pc] of this.peers) {
+          const senders = pc.getSenders();
+          const videoSender = senders.find(s => s.track?.kind === 'video');
+          if (videoSender && videoSender.track) {
+            console.log('[RTC] Re-confirming video sender for peer', remoteId);
+            // Forzar renegociación reemplazando el track
+            await videoSender.replaceTrack(vt);
+          } else {
+            console.warn('[RTC] No video sender found for peer', remoteId);
+          }
+        }
+      }
+    } else {
+      console.warn('[RTC] No video track available to toggle');
+    }
   }
 
   toggleAudioEnabled() {
@@ -114,9 +151,19 @@ class WebRTCManager {
     // ensure a video transceiver so los peers puedan recibir video
     pc.addTransceiver('video', { direction: 'sendrecv' });
 
-    // add local audio
+    // add local tracks (audio + video if available)
     if (this.localStream) {
-      this.localStream.getTracks().forEach(track => pc.addTrack(track, this.localStream!));
+      const tracks = this.localStream.getTracks();
+      console.log('[RTC] Adding local tracks to peer', remoteId, ':', {
+        totalTracks: tracks.length,
+        audio: tracks.filter(t => t.kind === 'audio').length,
+        video: tracks.filter(t => t.kind === 'video').length,
+        videoEnabled: tracks.find(t => t.kind === 'video')?.enabled
+      });
+      tracks.forEach(track => {
+        const sender = pc.addTrack(track, this.localStream!);
+        console.log('[RTC] Added track:', track.kind, 'id:', track.id, 'enabled:', track.enabled, 'sender:', !!sender);
+      });
     }
 
     pc.onicecandidate = (ev) => {
@@ -127,8 +174,26 @@ class WebRTCManager {
     };
 
     pc.ontrack = (ev) => {
+      console.log('[RTC] ontrack event for peer:', remoteId, {
+        track: ev.track.kind,
+        trackId: ev.track.id,
+        trackEnabled: ev.track.enabled,
+        streams: ev.streams.length
+      });
       const stream = ev.streams[0];
-      if (stream && this.events.onStream) this.events.onStream(remoteId, stream);
+      if (stream) {
+        console.log('[RTC] Stream received from peer:', remoteId, {
+          streamId: stream.id,
+          tracks: stream.getTracks().length,
+          videoTracks: stream.getVideoTracks().length,
+          audioTracks: stream.getAudioTracks().length,
+          videoEnabled: stream.getVideoTracks()[0]?.enabled,
+          audioEnabled: stream.getAudioTracks()[0]?.enabled
+        });
+        if (this.events.onStream) {
+          this.events.onStream(remoteId, stream);
+        }
+      }
     };
 
     // negotiationneeded -> send offer politely
