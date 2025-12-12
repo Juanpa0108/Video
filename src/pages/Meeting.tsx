@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { initWebRTC, getConnectedPeers, getPeerStream, getLocalStream, disconnectWebRTC, toggleAudio, toggleVideo } from '../services'
+import { initWebRTC, getConnectedPeers, getLocalStream, disconnectWebRTC, toggleAudio, toggleVideo } from '../services/webrtc'
 
 export function Meeting() {
   const localVideoRef = useRef<HTMLVideoElement>(null)

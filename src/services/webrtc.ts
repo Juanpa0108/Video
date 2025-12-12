@@ -216,3 +216,62 @@ class WebRTCManager {
 }
 
 export default WebRTCManager;
+// Legacy API for compatibility with Meeting.tsx
+let localStream: MediaStream | null = null;
+const peers: Record<string, MediaStream> = {};
+
+export async function initWebRTC(): Promise<void> {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const hasVideo = devices.some(d => d.kind === 'videoinput');
+    
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: hasVideo
+    });
+  } catch (err) {
+    console.error('Error initializing WebRTC:', err);
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: false
+    });
+  }
+}
+
+export function getLocalStream(): MediaStream | null {
+  return localStream;
+}
+
+export function getConnectedPeers(): string[] {
+  return Object.keys(peers);
+}
+
+export function getPeerStream(peerId: string): MediaStream | null {
+  return peers[peerId] || null;
+}
+
+export function disconnectWebRTC(): void {
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  Object.keys(peers).forEach(key => delete peers[key]);
+}
+
+export function toggleAudio(): void {
+  if (localStream) {
+    const audioTracks = localStream.getAudioTracks();
+    audioTracks.forEach(track => {
+      track.enabled = !track.enabled;
+    });
+  }
+}
+
+export function toggleVideo(): void {
+  if (localStream) {
+    const videoTracks = localStream.getVideoTracks();
+    videoTracks.forEach(track => {
+      track.enabled = !track.enabled;
+    });
+  }
+}
