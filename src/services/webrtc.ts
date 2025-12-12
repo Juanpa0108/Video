@@ -15,6 +15,7 @@ class WebRTCManager {
   private makingOffer: Map<PeerId, boolean> = new Map();
   private ignoreOffer: Map<PeerId, boolean> = new Map();
   private isSettingRemoteAnswerPending: Map<PeerId, boolean> = new Map();
+  private pendingCandidates: Map<PeerId, RTCIceCandidateInit[]> = new Map();
 
   constructor(socket: any, meetingId: string, events: RtcEvents = {}) {
     this.socket = socket;
@@ -93,10 +94,19 @@ class WebRTCManager {
   private createPeer(remoteId: PeerId) {
     if (this.peers.has(remoteId)) return this.peers.get(remoteId)!;
 
+    const turnUrl = import.meta.env.VITE_TURN_URL as string | undefined;
+    const turnUser = import.meta.env.VITE_TURN_USERNAME as string | undefined;
+    const turnCred = import.meta.env.VITE_TURN_CREDENTIAL as string | undefined;
+
+    const iceServers: RTCIceServer[] = [
+      { urls: ['stun:stun.l.google.com:19302', 'stun:global.stun.twilio.com:3478'] }
+    ];
+    if (turnUrl && turnUser && turnCred) {
+      iceServers.push({ urls: [turnUrl], username: turnUser, credential: turnCred });
+    }
+
     const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
-      ]
+      iceServers
     });
 
     // ensure an audio transceiver exists for predictable negotiation
@@ -140,6 +150,20 @@ class WebRTCManager {
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.debug('[RTC] ICE state ->', remoteId, pc.iceConnectionState);
+    };
+
+    pc.onsignalingstatechange = () => {
+      console.debug('[RTC] Signaling state ->', remoteId, pc.signalingState);
+    };
+
+    pc.onicegatheringstatechange = () => {
+      console.debug('[RTC] Gathering state ->', remoteId, pc.iceGatheringState);
+    };
+
+    this.pendingCandidates.set(remoteId, []);
+
     this.peers.set(remoteId, pc);
     return pc;
   }
@@ -172,6 +196,13 @@ class WebRTCManager {
         } else {
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
         }
+        const queued = this.pendingCandidates.get(from);
+        if (queued && queued.length) {
+          for (const c of queued) {
+            await pc.addIceCandidate(new RTCIceCandidate(c));
+          }
+          queued.length = 0;
+        }
         const answer = await pc.createAnswer();
         this.isSettingRemoteAnswerPending.set(from, true);
         await pc.setLocalDescription(answer);
@@ -190,6 +221,13 @@ class WebRTCManager {
       try {
         console.debug('[RTC] Received answer <-', from);
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        const queued = this.pendingCandidates.get(from);
+        if (queued && queued.length) {
+          for (const c of queued) {
+            await pc.addIceCandidate(new RTCIceCandidate(c));
+          }
+          queued.length = 0;
+        }
       } catch (err) {
         console.error('[RTC] Error handling answer from', from, ':', err);
       }
@@ -199,6 +237,15 @@ class WebRTCManager {
       const pc = this.peers.get(from);
       if (!pc) return;
       try {
+        if (!pc.remoteDescription) {
+          let q = this.pendingCandidates.get(from);
+          if (!q) {
+            q = [];
+            this.pendingCandidates.set(from, q);
+          }
+          q.push(candidate);
+          return;
+        }
         console.debug('[RTC] Received ICE <-', from);
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
@@ -210,6 +257,7 @@ class WebRTCManager {
       const pc = this.peers.get(from);
       if (pc) pc.close();
       this.peers.delete(from);
+      this.pendingCandidates.delete(from);
       this.events.onParticipantLeft?.(from);
     });
   }
@@ -231,10 +279,17 @@ export async function initWebRTC(): Promise<void> {
     });
   } catch (err) {
     console.error('Error initializing WebRTC:', err);
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: false
-    });
+    const e = err as any;
+    // Only fall back to audio when there is no camera device.
+    if (e?.name === 'NotFoundError') {
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false
+      });
+    } else {
+      // For NotAllowedError/SecurityError, propagate so UI can prompt user to enable permissions.
+      throw err;
+    }
   }
 }
 
